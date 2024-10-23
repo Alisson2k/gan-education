@@ -111,3 +111,5 @@ export const MESSAGE_CREATION_SCRIPT = `Crie um script de instruções para um n
 - O script deve ser adaptável, permitindo modificações com base no feedback futuro do usuário.
 - Garanta que as instruções sejam detalhadas o suficiente para uma filtragem eficaz, mantendo a flexibilidade.
 - Responda as dúvidas e perguntas baseado no nível de conhecimento que o usuário tiver sobre o tema.`;
+
+export const WAIT_MESSAGE = `Aguarde um momento enquanto processamos sua solicitação.`;

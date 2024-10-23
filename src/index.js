@@ -11,8 +11,10 @@ import {
   INITIAL_MESSAGE,
   MESSAGE_CREATION_SCRIPT,
   MESSAGE_INFO_COLLECTION,
+  WAIT_MESSAGE,
 } from "./messages.js";
 import { logger } from "./logger.js";
+import RabbitMQ from "./rabbitmq.js";
 
 const app = express();
 app.use(express.json());
@@ -23,6 +25,9 @@ const users = new MemoryStore();
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
+const rabbit = new RabbitMQ();
+rabbit.connect();
 
 let assistenteInterpretador = null;
 
@@ -64,42 +69,37 @@ function processMessages(body) {
 }
 
 async function run(phone, message) {
-  await mountUser(phone);
-  let user = await users.get(phone);
+  try {
+    const shouldProccess = await mountUser(phone);
+    if (!shouldProccess) {
+      sendMessage(phone, WAIT_MESSAGE);
+      return;
+    }
 
-  logger.info("Usuário:", user);
-
-  if (user.step === 1) {
-    await firstInteraction(user, message);
-  }
-
-  user = await users.get(phone);
-
-  if (user.step === 2) {
-    await subjectIteration(user, message);
-  }
-
-  user = await users.get(phone);
-
-  if (user.step === 3) {
-    await scriptIteration(user);
-  }
-
-  user = await users.get(phone);
-
-  if (user.step === 4) {
-    await mainIteration(user, message);
-  }
-
-  user = await users.get(phone);
+    let user = await users.get(phone);
+    users.set(phone, { ...user, executing: true });
+    rabbit.sendToQueue(`gan-queue-${phone}`, { phone, message });
+  } catch (error) {}
 }
 
 async function mountUser(phone) {
   const user = await users.get(phone);
+  logger.info("User:", user);
 
   if (!user) {
-    users.set(phone, { phone, step: 1 });
+    users.set(phone, { phone, step: 1, executing: true });
+  } else if (user.executing) {
+    return false;
   }
+
+  const queueName = `gan-queue-${phone}`;
+  const consumerCount = await rabbit.getConsumerCount(queueName);
+
+  if (consumerCount === 0) {
+    rabbit.consume(queueName, receiveMessage);
+  }
+
+  return true;
 }
 
 async function firstInteraction(user, message) {
@@ -241,7 +241,7 @@ async function mainIteration(user, message) {
 
   let run = await openai.beta.threads.runs.createAndPoll(user.thread, {
     assistant_id: user.assistant,
-    max_completion_tokens: 1024
+    max_completion_tokens: 1024,
   });
 
   if (run.status === "completed") {
@@ -281,13 +281,6 @@ async function mountMainAssistant(user) {
   });
 }
 
-init();
-
-function init() {
-  initAssistants();
-  initWebhook();
-}
-
 async function initAssistants() {
   const assistants = await openai.beta.assistants.list();
 
@@ -297,6 +290,56 @@ async function initAssistants() {
     }
   });
 }
+
+function init() {
+  initAssistants();
+  initWebhook();
+}
+
+const receiveMessage = async (body) => {
+  const phone = body.phone;
+  const message = body.message;
+
+  logger.info("Received message:", body);
+
+  try {
+    let user = await users.get(phone);
+
+    if (user.step === 1) {
+      await firstInteraction(user, message);
+    }
+
+    user = await users.get(phone);
+
+    if (user.step === 2) {
+      await subjectIteration(user, message);
+    }
+
+    user = await users.get(phone);
+
+    if (user.step === 3) {
+      await scriptIteration(user);
+    }
+
+    user = await users.get(phone);
+
+    if (user.step === 4) {
+      await mainIteration(user, message);
+    }
+
+    user = await users.get(phone);
+  } catch (error) {
+    logger.error("Error:", error);
+  } finally {
+    let user = await users.get(phone);
+
+    if (user) {
+      users.set(phone, { ...user, executing: false });
+    }
+  }
+};
+
+init();
 
 async function initWebhook() {
   setWebhook(process.env.WEBHOOK_URL);
